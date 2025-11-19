@@ -123,7 +123,7 @@ with col1:
 with col2:
     st.write("")
     st.write("")
-    if st.button("🌓 Toggle Theme", use_container_width=True):
+    if st.button("🌓 Toggle Theme"):
         st.session_state.dark_mode = not st.session_state.dark_mode
         st.rerun()
 
@@ -132,6 +132,10 @@ if 'job_id' not in st.session_state:
     st.session_state.job_id = None
 if 'tutorial_data' not in st.session_state:
     st.session_state.tutorial_data = None
+if 'youtube_url' not in st.session_state:
+    st.session_state.youtube_url = None
+if 'pdf_generated' not in st.session_state:
+    st.session_state.pdf_generated = False
 
 # Input section
 with st.container():
@@ -147,15 +151,18 @@ with st.container():
     with col2:
         st.write("")  # Spacing
         st.write("")  # Spacing
-        process_button = st.button("🚀 Convert to Tutorial", use_container_width=True)
+        process_button = st.button("🚀 Convert to Tutorial")
 
 # Process video
 if process_button and youtube_url:
+    st.session_state.youtube_url = youtube_url
+    st.session_state.pdf_generated = False  # Reset PDF generation flag
     with st.spinner("Starting video processing..."):
         try:
             response = requests.post(
                 f"{API_URL}/process",
-                json={"youtube_url": youtube_url}
+                json={"youtube_url": youtube_url},
+                timeout=30
             )
             
             if response.status_code == 200:
@@ -164,19 +171,28 @@ if process_button and youtube_url:
                 st.success(f"✅ Processing started! Job ID: {data['job_id']}")
             else:
                 st.error(f"❌ Error: {response.text}")
+        except requests.exceptions.ConnectionError:
+            st.error("❌ Connection error: Make sure the FastAPI server is running on http://localhost:8000")
+        except requests.exceptions.Timeout:
+            st.error("❌ Request timeout: Server is taking too long to respond")
         except Exception as e:
-            st.error(f"❌ Connection error: {str(e)}")
-            st.info("Make sure the FastAPI server is running on http://localhost:8000")
+            st.error(f"❌ Unexpected error: {str(e)}")
 
 # Show progress if job is active
-if st.session_state.job_id:
+if st.session_state.job_id and st.session_state.tutorial_data is None:
     progress_placeholder = st.empty()
     status_placeholder = st.empty()
     
     # Poll for status
-    while True:
+    max_polls = 300  # 10 minutes max (300 * 2 seconds)
+    poll_count = 0
+    
+    while poll_count < max_polls:
         try:
-            response = requests.get(f"{API_URL}/status/{st.session_state.job_id}")
+            response = requests.get(
+                f"{API_URL}/status/{st.session_state.job_id}",
+                timeout=10
+            )
             
             if response.status_code == 200:
                 status_data = response.json()
@@ -203,14 +219,19 @@ if st.session_state.job_id:
                 if status == 'completed':
                     # Fetch tutorial data
                     tutorial_response = requests.get(
-                        f"{API_URL}/tutorial-data/{st.session_state.job_id}"
+                        f"{API_URL}/tutorial-data/{st.session_state.job_id}",
+                        timeout=10
                     )
                     
                     if tutorial_response.status_code == 200:
                         st.session_state.tutorial_data = tutorial_response.json()
                         progress_placeholder.empty()
                         status_placeholder.empty()
-                        break
+                        st.success("✅ Tutorial generated successfully!")
+                        st.rerun()
+                    else:
+                        st.error("Failed to fetch tutorial data")
+                    break
                 
                 elif status == 'error':
                     st.error(f"Error: {status_data.get('message', 'Unknown error')}")
@@ -218,13 +239,22 @@ if st.session_state.job_id:
                     break
                 
                 time.sleep(2)  # Poll every 2 seconds
+                poll_count += 1
             else:
                 st.error("Failed to get status")
                 break
                 
+        except requests.exceptions.Timeout:
+            st.warning("Status check timeout, retrying...")
+            poll_count += 1
+            time.sleep(2)
         except Exception as e:
             st.error(f"Error checking status: {str(e)}")
             break
+    
+    if poll_count >= max_polls:
+        st.error("Processing timeout - please try again with a shorter video")
+        st.session_state.job_id = None
 
 # Display tutorial
 if st.session_state.tutorial_data:
@@ -234,23 +264,57 @@ if st.session_state.tutorial_data:
     st.markdown("---")
     st.markdown(f"## 📚 {tutorial['title']}")
     
-    # Download HTML button
-    col1, col2 = st.columns([1, 4])
+    # Download PDF section
+    st.markdown("### 📥 Download Tutorial")
+    
+    # Check if we need to load PDF data
+    if 'pdf_data' not in st.session_state:
+        st.session_state.pdf_data = None
+    
+    col1, col2 = st.columns([1, 3])
     with col1:
-        if st.button("📥 Download HTML", use_container_width=True):
-            try:
-                html_response = requests.get(
-                    f"{API_URL}/tutorial/{st.session_state.job_id}"
-                )
-                if html_response.status_code == 200:
-                    st.download_button(
-                        label="⬇️ Download Tutorial",
-                        data=html_response.text,
-                        file_name="tutorial.html",
-                        mime="text/html"
+        if st.button("🔄 Generate PDF", key="gen_pdf_btn"):
+            with st.spinner("Generating PDF... This may take a moment (30-60 seconds)"):
+                try:
+                    # Make request with longer timeout
+                    pdf_response = requests.get(
+                        f"{API_URL}/download-pdf/{st.session_state.job_id}",
+                        timeout=120,  # 2 minutes timeout for PDF generation
                     )
-            except Exception as e:
-                st.error(f"Error downloading: {str(e)}")
+                    
+                    if pdf_response.status_code == 200:
+                        st.session_state.pdf_data = pdf_response.content
+                        st.success("✅ PDF generated successfully!")
+                        st.rerun()
+                    elif pdf_response.status_code == 500:
+                        try:
+                            error_detail = pdf_response.json().get('detail', 'Unknown error')
+                        except:
+                            error_detail = pdf_response.text
+                        if 'wkhtmltopdf' in error_detail:
+                            st.error("❌ PDF generation failed: wkhtmltopdf is not installed")
+                            st.info("Please install wkhtmltopdf from: https://wkhtmltopdf.org/downloads.html")
+                        else:
+                            st.error(f"❌ PDF generation failed: {error_detail}")
+                    else:
+                        st.error(f"❌ Failed to generate PDF (Status: {pdf_response.status_code})")
+                        
+                except requests.exceptions.Timeout:
+                    st.error("❌ PDF generation timeout - the video may be too long or server is busy")
+                except requests.exceptions.ConnectionError:
+                    st.error("❌ Connection error - make sure the server is running")
+                except Exception as e:
+                    st.error(f"❌ Error generating PDF: {str(e)}")
+    
+    with col2:
+        if st.session_state.pdf_data is not None:
+            st.download_button(
+                label="⬇️ Download PDF File",
+                data=st.session_state.pdf_data,
+                file_name=f"tutorial_{st.session_state.job_id}.pdf",
+                mime="application/pdf",
+                key="download_pdf_final"
+            )
     
     # Introduction
     st.markdown("### 📖 Introduction")
@@ -284,21 +348,27 @@ if st.session_state.tutorial_data:
             </div>
             """, unsafe_allow_html=True)
             
-            # Step image - Fix for local file path
+            # Step image - Get from API endpoint
             try:
-                # Get image from API endpoint instead of local path
-                image_url = f"{API_URL}/image/{st.session_state.job_id}/{os.path.basename(step['frame'])}"
-                st.image(
-                    image_url,
-                    caption=f"⏱️ Timestamp: {step['timestamp']:.2f}s",
-                    use_container_width=True
-                )
+                filename = os.path.basename(step['frame'])
+                image_url = f"{API_URL}/image/{st.session_state.job_id}/{filename}"
+                
+                # Try to fetch and display the image
+                img_response = requests.get(image_url, timeout=10)
+                if img_response.status_code == 200:
+                    st.image(
+                        img_response.content,
+                        caption=f"⏱️ Timestamp: {step['timestamp']:.2f}s",
+                        use_column_width=True
+                    )
+                else:
+                    st.warning(f"⚠️ Image not available (Status: {img_response.status_code})")
             except Exception as e:
-                st.warning(f"Could not load image. Image will be available in downloaded HTML.")
+                st.error(f"❌ Error loading image: {str(e)}")
             
             # Video timestamp link
-            if youtube_url:
-                timestamp_url = f"{youtube_url}&t={int(step['timestamp'])}s"
+            if st.session_state.youtube_url:
+                timestamp_url = f"{st.session_state.youtube_url}&t={int(step['timestamp'])}s"
                 st.markdown(f"[▶️ Jump to this step in video]({timestamp_url})")
             
             st.markdown("---")
@@ -307,6 +377,8 @@ if st.session_state.tutorial_data:
     if st.button("🔄 Convert Another Video"):
         st.session_state.job_id = None
         st.session_state.tutorial_data = None
+        st.session_state.youtube_url = None
+        st.session_state.pdf_generated = False
         st.rerun()
 
 # Sidebar info
@@ -318,7 +390,7 @@ with st.sidebar:
     2. 🎤 Transcribe audio using Whisper
     3. 📝 Structure content using GPT-4o-mini
     4. 🖼️ Select relevant frames with AI vision
-    5. 📚 Generate beautiful tutorials
+    5. 📚 Generate beautiful PDF tutorials
     """)
     
     st.markdown("### 💡 Tips")
@@ -326,12 +398,13 @@ with st.sidebar:
     - Use educational/tutorial videos
     - Videos under 30 mins work best
     - Clear audio improves results
+    - PDF downloads include all images
     """)
 
 # Footer
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #666;">
-    Made by using FastAPI, Streamlit, and OpenAI
+    Made by using FastAPI, Streamlit, and OpenAI GPT-4o-mini
 </div>
 """, unsafe_allow_html=True)

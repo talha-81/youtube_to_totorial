@@ -4,7 +4,7 @@ import whisper
 import cv2
 import numpy as np
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import json
@@ -13,6 +13,9 @@ from dotenv import load_dotenv
 import base64
 from pathlib import Path
 import uuid
+import pdfkit
+import platform
+from io import BytesIO
 
 load_dotenv()
 
@@ -28,7 +31,14 @@ app.add_middleware(
 )
 
 # Initialize OpenAI client
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+try:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY not found in environment variables")
+    client = OpenAI(api_key=api_key)
+except Exception as e:
+    print(f"Error initializing OpenAI client: {e}")
+    raise
 
 # Store processing status
 processing_status = {}
@@ -513,7 +523,8 @@ def process_video_task(youtube_url: str, job_id: str):
             "status": "completed",
             "progress": 100,
             "html_path": html_path,
-            "tutorial_data": tutorial_data
+            "tutorial_data": tutorial_data,
+            "job_dir": processor.job_dir
         }
     except Exception as e:
         processing_status[job_id] = {
@@ -564,13 +575,323 @@ async def get_image(job_id: str, filename: str):
     if job_id not in processing_status:
         raise HTTPException(status_code=404, detail="Job not found")
     
-    # Construct the image path
     image_path = f"jobs/{job_id}/frames/{filename}"
     
     if not os.path.exists(image_path):
         raise HTTPException(status_code=404, detail="Image not found")
     
     return FileResponse(image_path, media_type="image/jpeg")
+
+def generate_pdf_html(tutorial_data, job_dir):
+    """Generate HTML optimized for PDF conversion with embedded images"""
+    
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>{tutorial_data['title']}</title>
+        <style>
+            * {{
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }}
+            
+            body {{
+                font-family: Arial, sans-serif;
+                line-height: 1.6;
+                color: #333;
+                background: white;
+            }}
+            
+            .header {{
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: black;
+                padding: 40px;
+                text-align: center;
+                margin-bottom: 30px;
+                page-break-after: avoid;
+            }}
+            
+            .header h1 {{
+                margin: 0;
+                font-size: 2.2em;
+                font-weight: bold;
+                margin-bottom: 10px;
+            }}
+            
+            .header p {{
+                margin: 0;
+                font-size: 1.1em;
+                opacity: 0.95;
+            }}
+            
+            .intro {{
+                background: #f8f9fa;
+                padding: 25px;
+                margin-bottom: 30px;
+                border-left: 5px solid #667eea;
+                page-break-inside: avoid;
+            }}
+            
+            .intro h2 {{
+                color: #667eea;
+                margin: 0 0 15px 0;
+                font-size: 1.8em;
+            }}
+            
+            .intro p {{
+                font-size: 1em;
+                color: #555;
+                line-height: 1.8;
+                margin: 0;
+            }}
+            
+            .step {{
+                background: white;
+                padding: 25px;
+                margin-bottom: 30px;
+                border: 1px solid #e0e0e0;
+                border-left: 5px solid #667eea;
+                page-break-inside: avoid;
+            }}
+            
+            .step-header {{
+                display: flex;
+                align-items: flex-start;
+                margin-bottom: 20px;
+                page-break-inside: avoid;
+            }}
+            
+            .step-number {{
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: black;
+                width: 45px;
+                height: 45px;
+                border-radius: 50%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 1.3em;
+                font-weight: bold;
+                margin-right: 20px;
+                flex-shrink: 0;
+            }}
+            
+            .step-title {{
+                font-size: 1.5em;
+                color: #2c3e50;
+                font-weight: bold;
+                margin: 0;
+            }}
+            
+            .step-explanation {{
+                color: #555;
+                margin-bottom: 20px;
+                font-size: 1em;
+                line-height: 1.8;
+            }}
+            
+            .step-image {{
+                width: 100%;
+                max-width: 100%;
+                height: auto;
+                border-radius: 8px;
+                margin-top: 20px;
+                margin-bottom: 15px;
+                display: block;
+                page-break-inside: avoid;
+            }}
+            
+            .timestamp {{
+                background: #e9ecef;
+                padding: 10px 15px;
+                border-radius: 5px;
+                font-size: 0.95em;
+                color: #6c757d;
+                font-weight: 500;
+            }}
+            
+            .footer {{
+                text-align: center;
+                margin-top: 40px;
+                padding-top: 20px;
+                border-top: 2px solid #667eea;
+                color: #6c757d;
+                font-size: 0.9em;
+                page-break-inside: avoid;
+            }}
+            
+            .footer p {{
+                margin: 8px 0;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>{tutorial_data['title']}</h1>
+            <p>📚 AI-Generated Step-by-Step Tutorial</p>
+        </div>
+        
+        <div class="intro">
+            <h2>📖 Introduction</h2>
+            <p>{tutorial_data['introduction']}</p>
+        </div>
+    """
+    
+    # Add steps with embedded images
+    for step in tutorial_data['steps']:
+        image_path = os.path.abspath(step['frame'])
+        img_src = ""
+        
+        try:
+            if os.path.exists(image_path):
+                with open(image_path, 'rb') as img_file:
+                    img_data = base64.b64encode(img_file.read()).decode('utf-8')
+                    img_src = f"data:image/jpeg;base64,{img_data}"
+            else:
+                print(f"Warning: Image not found at {image_path}")
+        except Exception as e:
+            print(f"Error loading image {image_path}: {e}")
+        
+        html_content += f"""
+        <div class="step">
+            <div class="step-header">
+                <div class="step-number">{step['step_number']}</div>
+                <h2 class="step-title">{step['title']}</h2>
+            </div>
+            <div class="step-explanation">
+                {step['explanation']}
+            </div>
+            {'<img src="' + img_src + '" alt="Step ' + str(step['step_number']) + '" class="step-image">' if img_src else '<p style="color: #999;">Image not available</p>'}
+            <div class="timestamp">
+                ⏱️ Video Timestamp: {step['timestamp']:.2f}s
+            </div>
+        </div>
+        """
+    
+    html_content += """
+        <div class="footer">
+            <p><strong>Generated with YouTube to Tutorial Converter</strong></p>
+            <p>Powered by AI • FastAPI • Streamlit • OpenAI</p>
+        </div>
+    </body>
+    </html>
+    """
+    
+    return html_content
+
+@app.get("/download-pdf/{job_id}")
+async def download_pdf(job_id: str):
+    """Generate and download tutorial as PDF"""
+    print(f"[PDF] Request received for job_id: {job_id}")
+    
+    if job_id not in processing_status:
+        print(f"[PDF] Job not found: {job_id}")
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    status = processing_status[job_id]
+    if status["status"] != "completed":
+        print(f"[PDF] Tutorial not ready: {status['status']}")
+        raise HTTPException(status_code=400, detail="Tutorial not ready yet")
+    
+    try:
+        tutorial_data = status["tutorial_data"]
+        job_dir = status["job_dir"]
+        
+        print(f"[PDF] Generating PDF HTML for job: {job_id}")
+        # Generate PDF HTML with embedded images
+        pdf_html = generate_pdf_html(tutorial_data, job_dir)
+        
+        # Convert HTML to PDF using pdfkit
+        pdf_path = f"{job_dir}/output/tutorial.pdf"
+        print(f"[PDF] PDF path: {pdf_path}")
+        
+        # pdfkit options for better output
+        options = {
+            'page-size': 'A4',
+            'margin-top': '1.5cm',
+            'margin-right': '1.5cm',
+            'margin-bottom': '1.5cm',
+            'margin-left': '1.5cm',
+            'encoding': 'UTF-8',
+            'enable-local-file-access': None,
+            'no-outline': None,
+            'print-media-type': None,
+            'minimum-font-size': 12,
+            'dpi': 300,
+            'quiet': ''
+        }
+        
+        # Detect wkhtmltopdf configuration
+        config = None
+        if platform.system() == 'Windows':
+            possible_paths = [
+                r'C:\Program Files\wkhtmltopdf\bin\wkhtmltopdf.exe',
+                r'C:\Program Files (x86)\wkhtmltopdf\bin\wkhtmltopdf.exe',
+            ]
+            
+            for path in possible_paths:
+                if os.path.exists(path):
+                    config = pdfkit.configuration(wkhtmltopdf=path)
+                    print(f"[PDF] Found wkhtmltopdf at: {path}")
+                    break
+        
+        # Try to generate PDF
+        print(f"[PDF] Starting PDF generation...")
+        try:
+            if config:
+                pdfkit.from_string(pdf_html, pdf_path, options=options, configuration=config)
+            else:
+                pdfkit.from_string(pdf_html, pdf_path, options=options)
+            
+            print(f"[PDF] PDF created successfully at: {pdf_path}")
+        except Exception as e:
+            error_msg = str(e)
+            print(f"[PDF] PDF generation error: {error_msg}")
+            
+            # Provide helpful error message
+            if "wkhtmltopdf" in error_msg.lower() or "no such file" in error_msg.lower():
+                raise HTTPException(
+                    status_code=500, 
+                    detail="wkhtmltopdf not found. Please install from https://wkhtmltopdf.org/downloads.html"
+                )
+            else:
+                raise HTTPException(status_code=500, detail=f"PDF generation failed: {error_msg}")
+        
+        # Verify PDF was created
+        if not os.path.exists(pdf_path):
+            print(f"[PDF] ERROR: PDF file was not created at {pdf_path}")
+            raise HTTPException(status_code=500, detail="PDF file was not created")
+        
+        # Check file size
+        file_size = os.path.getsize(pdf_path)
+        print(f"[PDF] PDF file size: {file_size} bytes")
+        
+        if file_size == 0:
+            print(f"[PDF] ERROR: PDF file is empty")
+            raise HTTPException(status_code=500, detail="PDF file is empty")
+        
+        # Return the PDF file
+        print(f"[PDF] Sending PDF file to client...")
+        return FileResponse(
+            pdf_path,
+            media_type="application/pdf",
+            filename=f"tutorial_{job_id}.pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename=tutorial_{job_id}.pdf",
+                "Cache-Control": "no-cache"
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[PDF] Unexpected error in download_pdf: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
