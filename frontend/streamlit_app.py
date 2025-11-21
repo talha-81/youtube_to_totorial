@@ -4,6 +4,7 @@ import time
 import json
 import os
 
+
 # Page config
 st.set_page_config(
     page_title="YouTube to Tutorial Converter",
@@ -13,7 +14,9 @@ st.set_page_config(
 )
 
 # API endpoint
-API_URL = "http://localhost:8000"
+import os
+API_URL = os.getenv("API_URL", "http://localhost:8000")
+
 
 # Initialize session state for theme
 if 'dark_mode' not in st.session_state:
