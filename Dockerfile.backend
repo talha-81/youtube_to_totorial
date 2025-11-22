@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxcb1 \
     xfonts-75dpi \
     xfonts-base \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Install wkhtmltopdf
@@ -39,6 +40,9 @@ WORKDIR /app
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Install Whisper from GitHub (official OpenAI version)
+RUN pip install --no-cache-dir git+https://github.com/openai/whisper.git
 
 # Copy backend code
 COPY backend/ ./backend/
