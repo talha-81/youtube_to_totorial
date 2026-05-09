@@ -1,4 +1,4 @@
-# 🎥 YouTube to Tutorial Converter
+# 🎥 YouTube to Tutorial Converter (prototype)
 
 Transform any YouTube video into a structured, AI-powered tutorial with step-by-step instructions and perfectly matched images. Automatically generates professional PDF documents with embedded images.
 
